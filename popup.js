@@ -43,8 +43,13 @@ function loadMessages() {
 
 // ── Update header badge count ─────────────────────────────────────────────────
 function updateBadge(messages) {
-  const pending = messages.filter(m => m.status === 'pending').length;
-  messageBadge.textContent = `${pending} scheduled`;
+  const pending  = messages.filter(m => m.status === 'pending').length;
+  const sending  = messages.filter(m => m.status === 'sending').length;
+  const failed   = messages.filter(m => m.status === 'failed').length;
+  let label = `${pending} scheduled`;
+  if (sending) label += ` · ${sending} sending`;
+  if (failed)  label += ` · ${failed} failed`;
+  messageBadge.textContent = label;
   clearAllBtn.style.display = messages.length > 0 ? 'block' : 'none';
 }
 
@@ -71,7 +76,7 @@ function renderMessages(messages) {
   messageList.innerHTML = sorted.map(msg => {
     const dt       = new Date(msg.scheduledTime);
     const isOverdue = msg.status === 'pending' && dt < new Date();
-    const status   = isOverdue ? 'overdue' : (msg.status === 'sent' ? 'notified' : msg.status);
+    const status   = isOverdue ? 'overdue' : msg.status;
     const timeStr  = dt.toLocaleString('en-US', {
       month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
     });
@@ -109,7 +114,7 @@ function renderMessages(messages) {
             </svg>
             ${timeStr}
           </div>
-          <span class="status-pill ${status}">${isOverdue ? 'Overdue' : (msg.status === 'notified' ? 'Notified ✓' : capitalise(msg.status))}</span>
+          <span class="status-pill ${status}">${statusLabel(msg.status, isOverdue)}</span>
         </div>
       </div>`;
   }).join('');
@@ -220,6 +225,15 @@ function escapeHtml(str) {
 
 function capitalise(str) {
   return str ? str.charAt(0).toUpperCase() + str.slice(1) : '';
+}
+
+function statusLabel(status, isOverdue) {
+  if (isOverdue)          return 'Overdue';
+  if (status === 'sending') return '⏳ Sending…';
+  if (status === 'sent')    return '✅ Sent';
+  if (status === 'failed')  return '❌ Failed';
+  if (status === 'notified') return 'Notified ✓';
+  return capitalise(status);
 }
 
 // ── Auto-refresh when background changes storage ──────────────────────────────

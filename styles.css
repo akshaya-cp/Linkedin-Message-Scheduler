@@ -362,3 +362,24 @@ body {
   background: #e6f4ea;
   color: #1a7a3e;
 }
+
+.status-pill.sending {
+  background: #fff8e1;
+  color: #b07d00;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.status-pill.sent {
+  background: #e6f4ea;
+  color: #1a7a3e;
+}
+
+.status-pill.failed {
+  background: #fdecea;
+  color: #b71c1c;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.5; }
+}

@@ -19,7 +19,10 @@
     "storage",
     "notifications",
     "alarms",
-    "tabs"
+    "tabs",
+    "scripting"
   ],
-  "host_permissions": []
+  "host_permissions": [
+    "https://www.linkedin.com/*"
+  ]
 }
