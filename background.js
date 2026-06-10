@@ -1,10 +1,14 @@
 // background.js - MV3 service worker
-// Two-phase injection:
-//   Phase 1 (main frame only)  → click the "Message" button
-//   Phase 2 (ALL frames/iframes) → find compose box, type, and send
+//
+// Flow:
+//  1. Alarm fires → open LinkedIn profile tab
+//  2. Profile loads → Phase 1: extract recipient ID from the Message link href
+//  3. Navigate tab to linkedin.com/messaging/compose/?recipient=<ID>  (full page, no iframe)
+//  4. Compose page loads → Phase 2: find compose box, type, send
 
 const ALARM_PREFIX = 'msg_';
 
+// ── Alarm fires ───────────────────────────────────────────────────────────────
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (!alarm.name.startsWith(ALARM_PREFIX)) return;
   const msgId = alarm.name.slice(ALARM_PREFIX.length);
@@ -24,24 +28,22 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
   await updateStatus(msgId, 'sending', {});
 
-  // Safety net: if nothing responds within 35 seconds, mark as failed
+  // Safety net: auto-fail after 40 seconds if nothing responds
   setTimeout(async () => {
     const { scheduledMessages: msgs = [] } = await chrome.storage.local.get('scheduledMessages');
     const current = msgs.find(m => m.id === msgId);
     if (current && current.status === 'sending') {
       await updateStatus(msgId, 'failed', {
-        errorReason: 'Timed out — script ran but no result received. Try again or send manually.'
+        errorReason: 'Timed out — no response from LinkedIn page. Make sure you are logged in.'
       });
     }
-  }, 35000);
+  }, 40000);
 
   try {
     const tab = await chrome.tabs.create({ url: msg.profileUrl, active: true });
     await chrome.storage.session.set({
       ['pending_tab_' + tab.id]: {
-        msgId: msg.id,
-        messageText: msg.messageText,
-        recipientName: msg.recipientName
+        msgId: msg.id, messageText: msg.messageText, recipientName: msg.recipientName
       }
     });
   } catch (err) {
@@ -49,11 +51,12 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
+// ── Tab navigation events ─────────────────────────────────────────────────────
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete') return;
   if (!tab.url || !tab.url.includes('linkedin.com')) return;
 
-  // ── Case A: tab navigated to a messaging thread (Phase 1 clicked a link) ──
+  // ── Case A: Messaging compose/thread page loaded → run Phase 2 ─────────────
   const navKey = 'phase2_nav_' + tabId;
   const navSession = await chrome.storage.session.get(navKey);
   const navPending = navSession[navKey];
@@ -62,63 +65,55 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     setTimeout(async () => {
       try {
         await chrome.scripting.executeScript({
-          target: { tabId, allFrames: true },
+          target: { tabId, allFrames: false }, // main frame only — full page compose
           func: phase2SendMessage,
-          args: [navPending.messageText, navPending.msgId, navPending.recipientName, 'nav-to-messaging']
+          args: [navPending.messageText, navPending.msgId, navPending.recipientName, tab.url]
         });
       } catch (err) {
-        await updateStatus(navPending.msgId, 'failed', { errorReason: '[Phase2-nav] ' + err.message });
+        await updateStatus(navPending.msgId, 'failed', { errorReason: '[Phase2] ' + err.message });
       }
-    }, 3000);
+    }, 3000); // 3s for React to render the compose form
     return;
   }
 
-  // ── Case B: initial profile page load ──────────────────────────────────────
+  // ── Case B: Profile page loaded → run Phase 1 to extract recipient ID ───────
   const sessionKey = 'pending_tab_' + tabId;
   const session = await chrome.storage.session.get(sessionKey);
   const pending = session[sessionKey];
   if (!pending) return;
 
   await chrome.storage.session.remove(sessionKey);
-  // Store for navigation-based Phase 2 trigger
-  await chrome.storage.session.set({ [navKey]: pending });
+  await chrome.storage.session.set({ [navKey]: pending }); // store for Case A
 
-  // ── Phase 1 (after 6s): click Message button in main frame ─────────────────
+  // Wait 6 seconds for LinkedIn SPA to fully render the profile actions
   setTimeout(async () => {
     try {
       const results = await chrome.scripting.executeScript({
         target: { tabId, allFrames: false },
-        func: phase1ClickMessageButton
+        func: phase1ExtractMessagingUrl
       });
-      const clickResult = results && results[0] && results[0].result;
+      const extracted = results && results[0] && results[0].result;
 
-      // ── Phase 2 (after 7 more seconds): find compose box in ALL frames ────
-      setTimeout(async () => {
-        try {
-          await chrome.scripting.executeScript({
-            target: { tabId, allFrames: true },
-            func: phase2SendMessage,
-            args: [pending.messageText, pending.msgId, pending.recipientName, clickResult || '']
-          });
-        } catch (err) {
-          await updateStatus(pending.msgId, 'failed', {
-            errorReason: '[Phase2 inject] ' + err.message
-          });
-          chrome.notifications.create('fail_p2_' + pending.msgId, {
-            type: 'basic', iconUrl: chrome.runtime.getURL('icons/icon128.png'),
-            title: 'Auto-send Failed', message: err.message, priority: 2
-          });
-        }
-      }, 5000);
+      if (!extracted) {
+        await chrome.storage.session.remove(navKey);
+        await updateStatus(pending.msgId, 'failed', {
+          errorReason: 'Could not find Message link on profile. Make sure you are logged in and connected.'
+        });
+        return;
+      }
+
+      // Navigate tab to the full messaging compose page
+      await chrome.tabs.update(tabId, { url: extracted });
+      // tabs.onUpdated Case A will fire when this page loads
 
     } catch (err) {
-      await updateStatus(pending.msgId, 'failed', {
-        errorReason: '[Phase1 inject] ' + err.message
-      });
+      await chrome.storage.session.remove(navKey);
+      await updateStatus(pending.msgId, 'failed', { errorReason: '[Phase1] ' + err.message });
     }
   }, 6000);
 });
 
+// ── Result from Phase 2 ───────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type !== 'LINKEDIN_SEND_RESULT') return;
   const { msgId, recipientName, success, error } = msg;
@@ -138,6 +133,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
 });
 
+// ── Reschedule on restart ─────────────────────────────────────────────────────
 chrome.runtime.onInstalled.addListener(rescheduleAllAlarms);
 chrome.runtime.onStartup.addListener(rescheduleAllAlarms);
 
@@ -160,94 +156,108 @@ async function updateStatus(msgId, status, extra) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PHASE 1 — runs in main frame only
-// Finds and clicks the "Message" button on the profile page.
-// Returns a string describing what happened (for debug).
+// PHASE 1 — runs in profile page (main frame)
+// Finds the Message link and extracts a clean messaging compose URL.
+// Does NOT click the link (avoids overlay iframe).
+// Returns full URL to navigate to, or null if not found.
 // ─────────────────────────────────────────────────────────────────────────────
-function phase1ClickMessageButton() {
+function phase1ExtractMessagingUrl() {
+  var allLinks = Array.from(document.querySelectorAll('a'));
 
-  function hasMessageText(el) {
+  function hasMessageLabel(el) {
+    var label = (el.getAttribute('aria-label') || '').toLowerCase();
+    if (label.includes('message')) return true;
     if (el.textContent.trim() === 'Message') return true;
     return Array.from(el.querySelectorAll('span')).some(function(s) {
       return s.textContent.trim() === 'Message';
     });
   }
 
-  // Priority 1: button (not anchor) inside the profile actions section
-  var actionsSection = document.querySelector(
-    '.pvs-profile-actions, .pv-top-card--actions, .pv-s-profile-actions, [data-section="topcard-actions"]'
-  );
-  if (actionsSection) {
-    var sectionBtns = Array.from(actionsSection.querySelectorAll('button'));
-    var found = sectionBtns.find(function(b) {
-      var label = (b.getAttribute('aria-label') || '').toLowerCase();
-      return label.includes('message') || hasMessageText(b);
-    });
-    if (found) { found.click(); return 'CLICKED(actions/button): ' + found.outerHTML.slice(0, 80); }
-  }
-
-  // Priority 2: any <button> on the page with "Message" text
-  var allBtns = Array.from(document.querySelectorAll('button'));
-  var found = allBtns.find(function(b) {
-    var label = (b.getAttribute('aria-label') || '').toLowerCase();
-    return label.includes('message') || hasMessageText(b);
+  // Find an anchor with a /messaging/ href that is the Message button
+  var msgLink = allLinks.find(function(a) {
+    var href = a.getAttribute('href') || '';
+    return href.includes('/messaging/') && hasMessageLabel(a);
   });
-  if (found) { found.click(); return 'CLICKED(button): aria=' + (found.getAttribute('aria-label') || '') + ' text=' + found.textContent.trim().slice(0, 30); }
 
-  // Priority 3: <a> inside profile actions (opens thread — still valid)
-  if (actionsSection) {
-    var sectionLinks = Array.from(actionsSection.querySelectorAll('a'));
-    found = sectionLinks.find(function(a) {
-      var label = (a.getAttribute('aria-label') || '').toLowerCase();
-      return label.includes('message') || hasMessageText(a);
-    });
-    if (found) { found.click(); return 'CLICKED(actions/link): href=' + (found.getAttribute('href') || '') + ' text=' + found.textContent.trim().slice(0, 30); }
+  if (msgLink) {
+    var href = msgLink.getAttribute('href');
+    // Parse out recipient / profileUrn params and build a clean full-page URL
+    try {
+      var u = new URL(href, 'https://www.linkedin.com');
+      var recipient  = u.searchParams.get('recipient');
+      var profileUrn = u.searchParams.get('profileUrn');
+
+      if (recipient) {
+        var clean = 'https://www.linkedin.com/messaging/compose/?recipient=' + encodeURIComponent(recipient);
+        if (profileUrn) clean += '&profileUrn=' + encodeURIComponent(profileUrn);
+        return clean;
+      }
+      // If no recipient param, use the href as-is (drop interop=msgOverlay)
+      u.searchParams.delete('interop');
+      u.searchParams.delete('screenContext');
+      return u.toString();
+    } catch(e) {
+      return 'https://www.linkedin.com' + href;
+    }
   }
 
-  // Priority 4: any <a> with "Message" text (last resort)
-  var allLinks = Array.from(document.querySelectorAll('a'));
-  found = allLinks.find(function(a) { return hasMessageText(a); });
-  if (found) { found.click(); return 'CLICKED(link/fallback): href=' + (found.getAttribute('href') || '') + ' text=' + found.textContent.trim().slice(0, 30); }
+  // Fallback: look for button (click it) — overlay will open in main page
+  var btns = Array.from(document.querySelectorAll('button'));
+  var btn = btns.find(function(b) {
+    var label = (b.getAttribute('aria-label') || '').toLowerCase();
+    return label.includes('message') || b.textContent.trim() === 'Message' ||
+           Array.from(b.querySelectorAll('span')).some(function(s) { return s.textContent.trim() === 'Message'; });
+  });
+  if (btn) {
+    btn.click();
+    return 'BUTTON_CLICKED_overlay';
+  }
 
-  var debug = Array.from(document.querySelectorAll('button')).slice(0, 6).map(function(b) {
-    return (b.getAttribute('aria-label') || b.textContent.trim().slice(0, 15));
+  // Debug: list what's on the page
+  var debug = allLinks.slice(0, 5).map(function(a) {
+    return (a.getAttribute('href') || '').slice(0, 40) + '[' + a.textContent.trim().slice(0, 15) + ']';
   }).join(' / ');
-  return 'NOT_FOUND. Buttons: ' + debug;
+  return 'NOT_FOUND: ' + debug;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PHASE 2 — injected into ALL frames (including iframes)
-// Each frame checks for a compose box. Only the frame that has one proceeds.
+// PHASE 2 — runs in the LinkedIn messaging compose page (main frame, full page)
+// Finds compose box, types message, clicks Send.
 // ─────────────────────────────────────────────────────────────────────────────
-function phase2SendMessage(messageText, msgId, recipientName, phase1Result) {
+function phase2SendMessage(messageText, msgId, recipientName, pageUrl) {
   function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
 
   function waitFor(fn, label, timeout) {
-    timeout = timeout || 10000;
+    timeout = timeout || 12000;
     return new Promise(function(resolve, reject) {
       var elapsed = 0;
       var iv = setInterval(function() {
         var el = fn();
         if (el) { clearInterval(iv); resolve(el); return; }
         elapsed += 400;
-        if (elapsed >= timeout) { clearInterval(iv); reject(new Error('[' + label + '] timeout')); }
+        if (elapsed >= timeout) {
+          clearInterval(iv);
+          var all = Array.from(document.querySelectorAll('[contenteditable], textarea, input')).slice(0, 4);
+          var info = all.map(function(e) {
+            return e.tagName + '[ce=' + e.getAttribute('contenteditable') + '][ph=' + (e.getAttribute('placeholder') || e.getAttribute('aria-label') || '') + ']';
+          }).join(' | ') || 'none';
+          reject(new Error('[' + label + '] timeout. Editables: ' + info + ' | url=' + pageUrl.slice(0,60)));
+        }
       }, 400);
     });
   }
 
   function findComposeBox() {
     var selectors = [
-      '.msg-form__contenteditable[contenteditable="true"]',
-      '.msg-overlay-conversation-bubble [contenteditable="true"]',
+      'div.msg-form__contenteditable[contenteditable="true"]',
       'div[aria-label="Write a message…"][contenteditable="true"]',
       'div[aria-label="Write a message"][contenteditable="true"]',
       'div[role="textbox"][contenteditable="true"]',
       '.msg-form [contenteditable="true"]',
       '[contenteditable="true"]',
-      '.msg-form__textarea',
+      'textarea.msg-form__textarea',
       'textarea[placeholder*="message" i]',
-      'textarea[placeholder*="write" i]',
-      'textarea'
+      'textarea[placeholder*="write" i]'
     ];
     for (var i = 0; i < selectors.length; i++) {
       var el = document.querySelector(selectors[i]);
@@ -261,55 +271,23 @@ function phase2SendMessage(messageText, msgId, recipientName, phase1Result) {
     if (el) return el;
     var btns = Array.from(document.querySelectorAll('button'));
     el = btns.find(function(b) {
-      var label = (b.getAttribute('aria-label') || '').trim().toLowerCase();
+      var label = (b.getAttribute('aria-label') || '').toLowerCase();
       var text  = b.textContent.trim().toLowerCase();
       return (label === 'send' || text === 'send') && !b.disabled;
     });
     if (el) return el;
-    el = document.querySelector('.msg-form button[type="submit"]:not(:disabled)') ||
-         document.querySelector('.msg-overlay-conversation-bubble button[type="submit"]:not(:disabled)') ||
-         document.querySelector('form button[type="submit"]:not(:disabled)');
-    return el || null;
+    return document.querySelector('.msg-form button[type="submit"]:not(:disabled)') || null;
   }
 
-  // ── Skip background/preload frames LinkedIn uses for prefetching ─────────
-  var frameUrl = window.location.href;
-  if (frameUrl.includes('/preload') || frameUrl.includes('_bprMode') || frameUrl.includes('bprMode') || frameUrl.includes('li-page-preload')) {
-    return;
-  }
-
-  var isMainFrame = (window === window.top);
-
-  // ── Check if THIS frame has a compose box ───────────────────────────────
-  var immediate = findComposeBox();
-  if (!immediate) {
-    // Main frame reports back with debug info so we know what's on the page
-    if (isMainFrame) {
-      var allEditable = Array.from(document.querySelectorAll('[contenteditable], textarea, input')).slice(0, 5);
-      var editableInfo = allEditable.map(function(e) {
-        return e.tagName + '[ce=' + e.getAttribute('contenteditable') + '][ph=' + (e.getAttribute('placeholder') || e.getAttribute('aria-label') || '') + ']';
-      }).join(' | ') || 'none';
-      chrome.runtime.sendMessage({
-        type: 'LINKEDIN_SEND_RESULT', msgId: msgId, recipientName: recipientName,
-        success: false,
-        error: '[Phase2] No compose box. URL=' + frameUrl.slice(0, 80) + ' | Editables: ' + editableInfo + ' | p1=' + phase1Result
-      });
-    }
-    return;
-  }
-
-  // ── This frame has the compose box — proceed ───────────────────────────
   async function send() {
     try {
-      // Wait for compose box to be fully ready (in case it's still animating)
-      var composeBox = await waitFor(findComposeBox, 'ComposeBox', 8000);
+      var composeBox = await waitFor(findComposeBox, 'ComposeBox', 12000);
 
       composeBox.click();
       composeBox.focus();
       await sleep(600);
 
       var isTextarea = composeBox.tagName === 'TEXTAREA' || composeBox.tagName === 'INPUT';
-
       if (isTextarea) {
         var setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
         setter.call(composeBox, messageText);
@@ -327,9 +305,8 @@ function phase2SendMessage(messageText, msgId, recipientName, phase1Result) {
       }
 
       await sleep(1000);
-
-      var enteredText = isTextarea ? composeBox.value : composeBox.textContent;
-      if (!enteredText || enteredText.trim() === '') {
+      var entered = isTextarea ? composeBox.value : composeBox.textContent;
+      if (!entered || entered.trim() === '') {
         throw new Error('[type] Text did not register (tag=' + composeBox.tagName + ')');
       }
 
@@ -337,17 +314,10 @@ function phase2SendMessage(messageText, msgId, recipientName, phase1Result) {
       sendBtn.click();
       await sleep(2000);
 
-      chrome.runtime.sendMessage({
-        type: 'LINKEDIN_SEND_RESULT', msgId: msgId,
-        recipientName: recipientName, success: true
-      });
+      chrome.runtime.sendMessage({ type: 'LINKEDIN_SEND_RESULT', msgId: msgId, recipientName: recipientName, success: true });
 
     } catch (err) {
-      chrome.runtime.sendMessage({
-        type: 'LINKEDIN_SEND_RESULT', msgId: msgId,
-        recipientName: recipientName, success: false,
-        error: err.message + ' | p1=' + phase1Result + ' | frame=' + window.location.href.slice(0, 60)
-      });
+      chrome.runtime.sendMessage({ type: 'LINKEDIN_SEND_RESULT', msgId: msgId, recipientName: recipientName, success: false, error: err.message });
     }
   }
 
