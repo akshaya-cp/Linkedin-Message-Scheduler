@@ -136,25 +136,42 @@ function autoSendLinkedInMessage(messageText, msgId, recipientName) {
   }
 
   function findComposeBox() {
-    var selectors = [
+    // contenteditable selectors (LinkedIn historically uses these)
+    var ceSelectors = [
       '.msg-form__contenteditable[contenteditable="true"]',
       '.msg-overlay-conversation-bubble [contenteditable="true"]',
       'div[aria-label="Write a message…"][contenteditable="true"]',
       'div[aria-label="Write a message"][contenteditable="true"]',
       'div[role="textbox"][contenteditable="true"]',
       '.msg-form [contenteditable="true"]',
-      'div[contenteditable="true"]'
+      '[contenteditable="true"]'
     ];
-    for (var i = 0; i < selectors.length; i++) {
-      var el = document.querySelector(selectors[i]);
+    for (var i = 0; i < ceSelectors.length; i++) {
+      var el = document.querySelector(ceSelectors[i]);
       if (el) return el;
     }
-    // Last resort: any visible contenteditable
-    var all = Array.from(document.querySelectorAll('[contenteditable="true"]'));
-    return all.find(function(e) {
+    // textarea fallback (newer LinkedIn UI)
+    var textareaSelectors = [
+      '.msg-form__textarea',
+      '.msg-overlay-conversation-bubble textarea',
+      '.msg-form textarea',
+      'textarea[placeholder*="message" i]',
+      'textarea[placeholder*="write" i]',
+      'textarea'
+    ];
+    for (var j = 0; j < textareaSelectors.length; j++) {
+      var ta = document.querySelector(textareaSelectors[j]);
+      if (ta) return ta;
+    }
+    return null;
+  }
+
+  function debugComposeArea() {
+    var all = Array.from(document.querySelectorAll('[contenteditable], textarea, input[type="text"]'));
+    return 'Editable els: ' + all.slice(0, 6).map(function(e) {
       var r = e.getBoundingClientRect();
-      return r.width > 80 && r.height > 15;
-    }) || null;
+      return e.tagName + '[ce=' + e.getAttribute('contenteditable') + '][' + Math.round(r.width) + 'x' + Math.round(r.height) + ']';
+    }).join(' / ');
   }
 
   function findMessageButton() {
@@ -225,12 +242,12 @@ function autoSendLinkedInMessage(messageText, msgId, recipientName) {
 
         step = 'click-message-button';
         messageBtn.click();
-        await sleep(3000); // wait for overlay to animate open
+        await sleep(4000); // wait for overlay to fully animate open
       }
 
       // ── Step 2: locate compose box ───────────────────────────────────────
       step = 'find-compose-box';
-      var composeBox = await waitFor(findComposeBox, 'Compose Box', 12000);
+      var composeBox = await waitFor(findComposeBox, 'Compose Box', 12000, debugComposeArea);
 
       // ── Step 3: type the message ─────────────────────────────────────────
       step = 'type-message';
@@ -238,20 +255,31 @@ function autoSendLinkedInMessage(messageText, msgId, recipientName) {
       composeBox.focus();
       await sleep(500);
 
-      document.execCommand('selectAll', false, null);
-      document.execCommand('delete', false, null);
-      await sleep(300);
+      var isTextarea = composeBox.tagName === 'TEXTAREA' || composeBox.tagName === 'INPUT';
 
-      var typed = document.execCommand('insertText', false, messageText);
-      if (!typed || composeBox.textContent.trim() === '') {
-        composeBox.innerHTML = messageText;
-        composeBox.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: messageText }));
+      if (isTextarea) {
+        // Standard textarea — set value and fire React events
+        var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+        nativeInputValueSetter.call(composeBox, messageText);
+        composeBox.dispatchEvent(new Event('input', { bubbles: true }));
+        composeBox.dispatchEvent(new Event('change', { bubbles: true }));
+      } else {
+        // contenteditable div
+        document.execCommand('selectAll', false, null);
+        document.execCommand('delete', false, null);
+        await sleep(300);
+        var typed = document.execCommand('insertText', false, messageText);
+        if (!typed || composeBox.textContent.trim() === '') {
+          composeBox.textContent = messageText;
+          composeBox.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: messageText }));
+        }
       }
       await sleep(1000);
 
       // Verify text was actually entered
-      if (composeBox.textContent.trim() === '') {
-        throw new Error('[type-message] Text did not register in compose box');
+      var enteredText = isTextarea ? composeBox.value : composeBox.textContent;
+      if (!enteredText || enteredText.trim() === '') {
+        throw new Error('[type-message] Text did not register in compose box (tag: ' + composeBox.tagName + ')');
       }
 
       // ── Step 4: click Send ───────────────────────────────────────────────
