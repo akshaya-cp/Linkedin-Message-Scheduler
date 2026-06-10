@@ -56,7 +56,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       });
       const clickResult = results && results[0] && results[0].result;
 
-      // ── Phase 2 (after 5 more seconds): find compose box in ALL frames ────
+      // ── Phase 2 (after 7 more seconds): find compose box in ALL frames ────
       setTimeout(async () => {
         try {
           await chrome.scripting.executeScript({
@@ -129,48 +129,54 @@ async function updateStatus(msgId, status, extra) {
 // Returns a string describing what happened (for debug).
 // ─────────────────────────────────────────────────────────────────────────────
 function phase1ClickMessageButton() {
-  var allClickable = Array.from(document.querySelectorAll('button, a, [role="button"]'));
 
-  function findBtn() {
-    // aria-label exactly "Message" or starts with "Message "
-    var found = allClickable.find(function(el) {
-      var label = (el.getAttribute('aria-label') || '').trim();
-      return label === 'Message' || label.toLowerCase().startsWith('message ');
+  function hasMessageText(el) {
+    if (el.textContent.trim() === 'Message') return true;
+    return Array.from(el.querySelectorAll('span')).some(function(s) {
+      return s.textContent.trim() === 'Message';
     });
-    if (found) return found;
-
-    // span child with text exactly "Message"
-    found = allClickable.find(function(el) {
-      return Array.from(el.querySelectorAll('span')).some(function(s) {
-        return s.textContent.trim() === 'Message';
-      });
-    });
-    if (found) return found;
-
-    // LinkedIn-specific profile action class
-    found = document.querySelector('.pvs-profile-actions__action, .pv-s-profile-actions__action');
-    if (found && found.textContent.includes('Message')) return found;
-
-    // href containing messaging
-    found = document.querySelector('a[href*="messaging/compose"], a[href*="messaging-overlay"]');
-    if (found) return found;
-
-    // exact text content fallback
-    found = allClickable.find(function(el) { return el.textContent.trim() === 'Message'; });
-    return found || null;
   }
 
-  var btn = findBtn();
-  if (!btn) {
-    // Debug: list first 8 clickable elements
-    var debug = allClickable.slice(0, 8).map(function(e) {
-      return e.tagName + '[' + (e.getAttribute('aria-label') || e.textContent.trim().slice(0, 20)) + ']';
-    }).join(' / ');
-    return 'NOT_FOUND: ' + debug;
+  // Priority 1: button (not anchor) inside the profile actions section
+  var actionsSection = document.querySelector(
+    '.pvs-profile-actions, .pv-top-card--actions, .pv-s-profile-actions, [data-section="topcard-actions"]'
+  );
+  if (actionsSection) {
+    var sectionBtns = Array.from(actionsSection.querySelectorAll('button'));
+    var found = sectionBtns.find(function(b) {
+      var label = (b.getAttribute('aria-label') || '').toLowerCase();
+      return label.includes('message') || hasMessageText(b);
+    });
+    if (found) { found.click(); return 'CLICKED(actions/button): ' + found.outerHTML.slice(0, 80); }
   }
 
-  btn.click();
-  return 'CLICKED: ' + btn.tagName + ' aria=' + (btn.getAttribute('aria-label') || '') + ' text=' + btn.textContent.trim().slice(0, 30);
+  // Priority 2: any <button> on the page with "Message" text
+  var allBtns = Array.from(document.querySelectorAll('button'));
+  var found = allBtns.find(function(b) {
+    var label = (b.getAttribute('aria-label') || '').toLowerCase();
+    return label.includes('message') || hasMessageText(b);
+  });
+  if (found) { found.click(); return 'CLICKED(button): aria=' + (found.getAttribute('aria-label') || '') + ' text=' + found.textContent.trim().slice(0, 30); }
+
+  // Priority 3: <a> inside profile actions (opens thread — still valid)
+  if (actionsSection) {
+    var sectionLinks = Array.from(actionsSection.querySelectorAll('a'));
+    found = sectionLinks.find(function(a) {
+      var label = (a.getAttribute('aria-label') || '').toLowerCase();
+      return label.includes('message') || hasMessageText(a);
+    });
+    if (found) { found.click(); return 'CLICKED(actions/link): href=' + (found.getAttribute('href') || '') + ' text=' + found.textContent.trim().slice(0, 30); }
+  }
+
+  // Priority 4: any <a> with "Message" text (last resort)
+  var allLinks = Array.from(document.querySelectorAll('a'));
+  found = allLinks.find(function(a) { return hasMessageText(a); });
+  if (found) { found.click(); return 'CLICKED(link/fallback): href=' + (found.getAttribute('href') || '') + ' text=' + found.textContent.trim().slice(0, 30); }
+
+  var debug = Array.from(document.querySelectorAll('button')).slice(0, 6).map(function(b) {
+    return (b.getAttribute('aria-label') || b.textContent.trim().slice(0, 15));
+  }).join(' / ');
+  return 'NOT_FOUND. Buttons: ' + debug;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -228,6 +234,12 @@ function phase2SendMessage(messageText, msgId, recipientName, phase1Result) {
          document.querySelector('.msg-overlay-conversation-bubble button[type="submit"]:not(:disabled)') ||
          document.querySelector('form button[type="submit"]:not(:disabled)');
     return el || null;
+  }
+
+  // ── Skip background/preload frames LinkedIn uses for prefetching ─────────
+  var frameUrl = window.location.href;
+  if (frameUrl.includes('/preload') || frameUrl.includes('_bprMode') || frameUrl.includes('bprMode') || frameUrl.includes('li-page-preload')) {
+    return;
   }
 
   // ── Check if THIS frame has a compose box ───────────────────────────────
