@@ -379,6 +379,17 @@ body {
   color: #b71c1c;
 }
 
+.card-error {
+  font-size: 11px;
+  color: #b71c1c;
+  background: #fff5f5;
+  border-left: 3px solid #e05c2e;
+  padding: 5px 8px;
+  border-radius: 4px;
+  margin-bottom: 6px;
+  line-height: 1.4;
+}
+
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.5; }

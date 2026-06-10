@@ -107,6 +107,9 @@ function renderMessages(messages) {
           </div>
         </div>
         <div class="card-message">${escapeHtml(msg.messageText)}</div>
+        ${msg.status === 'failed' && msg.errorReason
+          ? `<div class="card-error">⚠️ ${escapeHtml(msg.errorReason)}</div>`
+          : ''}
         <div class="card-footer">
           <div class="card-time">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke-width="2">
