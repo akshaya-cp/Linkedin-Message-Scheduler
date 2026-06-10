@@ -106,8 +106,9 @@ function autoSendLinkedInMessage(messageText, msgId, recipientName) {
 
   function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
 
-  // Poll every 500ms until element found or timeout
-  function waitFor(fn, label, timeout) {
+  // Poll every 500ms until element found or timeout.
+  // debugFn() is called on timeout to add extra info to the error.
+  function waitFor(fn, label, timeout, debugFn) {
     timeout = timeout || 15000;
     return new Promise(function(resolve, reject) {
       var elapsed = 0;
@@ -117,60 +118,84 @@ function autoSendLinkedInMessage(messageText, msgId, recipientName) {
         elapsed += 500;
         if (elapsed >= timeout) {
           clearInterval(interval);
-          reject(new Error('[' + label + '] Not found after ' + (timeout/1000) + 's'));
+          var extra = debugFn ? (' | ' + debugFn()) : '';
+          reject(new Error('[' + label + '] Not found after ' + (timeout/1000) + 's' + extra));
         }
       }, 500);
     });
   }
 
+  // Snapshot of first N clickable elements for debug output
+  function debugClickable(n) {
+    var els = Array.from(document.querySelectorAll('button, a[href], [role="button"]')).slice(0, n || 6);
+    return els.map(function(e) {
+      var label = e.getAttribute('aria-label') || '';
+      var text  = e.textContent.trim().replace(/\s+/g, ' ').slice(0, 25);
+      return e.tagName + (label ? '[aria=' + label.slice(0,20) + ']' : '[' + text + ']');
+    }).join(' / ');
+  }
+
   function findComposeBox() {
-    // All known LinkedIn compose box selectors
     var selectors = [
       '.msg-form__contenteditable[contenteditable="true"]',
       '.msg-overlay-conversation-bubble [contenteditable="true"]',
       'div[aria-label="Write a message…"][contenteditable="true"]',
       'div[aria-label="Write a message"][contenteditable="true"]',
       'div[role="textbox"][contenteditable="true"]',
-      '.msg-form [contenteditable="true"]'
+      '.msg-form [contenteditable="true"]',
+      'div[contenteditable="true"]'
     ];
     for (var i = 0; i < selectors.length; i++) {
       var el = document.querySelector(selectors[i]);
       if (el) return el;
     }
-    // Last resort: any visible contenteditable with area > threshold
+    // Last resort: any visible contenteditable
     var all = Array.from(document.querySelectorAll('[contenteditable="true"]'));
     return all.find(function(e) {
       var r = e.getBoundingClientRect();
-      return r.width > 100 && r.height > 20;
+      return r.width > 80 && r.height > 15;
     }) || null;
   }
 
   function findMessageButton() {
-    // Method 1: button with a SPAN child whose text is exactly "Message"
-    var btns = Array.from(document.querySelectorAll('button'));
-    var found = btns.find(function(b) {
-      var spans = Array.from(b.querySelectorAll('span'));
-      return spans.some(function(s) { return s.textContent.trim() === 'Message'; });
+    var allClickable = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+
+    // 1. aria-label is "Message" or starts with "Message "
+    var found = allClickable.find(function(el) {
+      var label = (el.getAttribute('aria-label') || '').trim();
+      return label === 'Message' || label.toLowerCase().startsWith('message ');
     });
     if (found) return found;
 
-    // Method 2: aria-label contains "message" (case insensitive)
-    found = document.querySelector('button[aria-label*="essage"]');
+    // 2. has a span[aria-hidden] child with text "Message" (LinkedIn icon+text pattern)
+    found = allClickable.find(function(el) {
+      return Array.from(el.querySelectorAll('span')).some(function(s) {
+        return s.textContent.trim() === 'Message';
+      });
+    });
     if (found) return found;
 
-    // Method 3: button textContent is exactly "Message"
-    found = btns.find(function(b) { return b.textContent.trim() === 'Message'; });
+    // 3. LinkedIn-specific action button classes
+    var actionBtn = document.querySelector('.pvs-profile-actions__action, .pv-s-profile-actions__action');
+    if (actionBtn && actionBtn.textContent.includes('Message')) return actionBtn;
+
+    // 4. href containing messaging/compose or messaging-overlay
+    found = document.querySelector('a[href*="messaging/compose"], a[href*="messaging-overlay"]');
+    if (found) return found;
+
+    // 5. any clickable whose short text is exactly "Message"
+    found = allClickable.find(function(el) {
+      return el.textContent.trim() === 'Message';
+    });
     if (found) return found;
 
     return null;
   }
 
   function findSendButton() {
-    // Method 1: known class
-    var el = document.querySelector('button.msg-form__send-button');
-    if (el && !el.disabled) return el;
+    var el = document.querySelector('button.msg-form__send-button:not(:disabled)');
+    if (el) return el;
 
-    // Method 2: button with aria-label "Send" or text "Send"
     var btns = Array.from(document.querySelectorAll('button'));
     el = btns.find(function(b) {
       var label = (b.getAttribute('aria-label') || '').trim().toLowerCase();
@@ -179,7 +204,6 @@ function autoSendLinkedInMessage(messageText, msgId, recipientName) {
     });
     if (el) return el;
 
-    // Method 3: submit button inside msg form
     el = document.querySelector('.msg-form button[type="submit"]:not(:disabled)') ||
          document.querySelector('.msg-overlay-conversation-bubble button[type="submit"]:not(:disabled)');
     return el || null;
@@ -195,7 +219,9 @@ function autoSendLinkedInMessage(messageText, msgId, recipientName) {
 
       if (!composeAlreadyOpen) {
         step = 'find-message-button';
-        var messageBtn = await waitFor(findMessageButton, 'Message Button', 12000);
+          var messageBtn = await waitFor(findMessageButton, 'Message Button', 12000, function() {
+            return 'PAGE ELEMENTS: ' + debugClickable(8);
+          });
 
         step = 'click-message-button';
         messageBtn.click();
