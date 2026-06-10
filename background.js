@@ -199,45 +199,65 @@ function autoSendLinkedInMessage(messageText, msgId, recipientName) {
       var alreadyMessaging = url.includes('/messaging/');
 
       if (!alreadyMessaging) {
-        // ── Profile page: locate and click the "Message" button ─────────────
-        var messageBtn = await waitFor(function() {
-          var els = Array.from(document.querySelectorAll('button, a'));
-          return els.find(function(el) {
-            var ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
-            // Get only direct/simple text, ignore nested icon text
-            var text = '';
-            el.childNodes.forEach(function(node) {
-              if (node.nodeType === Node.TEXT_NODE) text += node.textContent;
-              if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'SPAN') text += node.textContent;
-            });
-            text = text.trim();
+        // If a compose box is already visible (e.g. overlay bubble already open),
+        // skip clicking the Message button entirely.
+        var existingCompose =
+          document.querySelector('.msg-form__contenteditable[contenteditable="true"]') ||
+          document.querySelector('.msg-overlay-conversation-bubble [contenteditable="true"]') ||
+          document.querySelector('div[role="textbox"][contenteditable="true"]');
 
-            return (
-              ariaLabel.includes('message') ||
-              text === 'Message'             ||
-              text === 'Send message'        ||
-              el.textContent.trim() === 'Message'
-            );
-          }) || null;
-        }, 12000);
+        if (!existingCompose) {
+          // ── Profile page: locate and click the "Message" button ─────────────
+          var messageBtn = await waitFor(function() {
+            var els = Array.from(document.querySelectorAll('button, a'));
+            return els.find(function(el) {
+              var ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+              var text = '';
+              el.childNodes.forEach(function(node) {
+                if (node.nodeType === Node.TEXT_NODE) text += node.textContent;
+                if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'SPAN') text += node.textContent;
+              });
+              text = text.trim();
+              return (
+                ariaLabel.includes('message') ||
+                text === 'Message'             ||
+                text === 'Send message'        ||
+                el.textContent.trim() === 'Message'
+              );
+            }) || null;
+          }, 12000);
 
-        messageBtn.click();
-
-        // Wait for the messaging drawer/modal to animate open
-        await sleep(2500);
+          messageBtn.click();
+          // Wait for the messaging drawer/overlay bubble to animate open
+          await sleep(2500);
+        }
       }
 
       // ── Find the compose textbox ─────────────────────────────────────────
+      // LinkedIn has multiple compose UIs: full page, overlay bubble, drawer.
+      // We try specific selectors first, then fall back to any visible contenteditable.
       var composeBox = await waitFor(function() {
-        // LinkedIn uses several selectors across different product updates
-        return (
-          document.querySelector('.msg-form__contenteditable[contenteditable="true"]') ||
-          document.querySelector('div[aria-label="Write a message…"][contenteditable="true"]') ||
-          document.querySelector('div[aria-label="Write a message"][contenteditable="true"]')   ||
-          document.querySelector('div[role="textbox"][contenteditable="true"]')                 ||
-          document.querySelector('[data-artdeco-is-focused] [contenteditable="true"]')
-        );
-      }, 12000);
+        // Specific known selectors (full page + overlay bubble)
+        var el =
+          document.querySelector('.msg-form__contenteditable[contenteditable="true"]')           ||
+          document.querySelector('.msg-overlay-conversation-bubble [contenteditable="true"]')    ||
+          document.querySelector('div[aria-label="Write a message…"][contenteditable="true"]')   ||
+          document.querySelector('div[aria-label="Write a message"][contenteditable="true"]')    ||
+          document.querySelector('div[role="textbox"][contenteditable="true"]')                  ||
+          document.querySelector('.msg-form [contenteditable="true"]')                           ||
+          document.querySelector('.msg-convo-wrapper [contenteditable="true"]');
+
+        // Last-resort: any contenteditable div with visible dimensions
+        if (!el) {
+          var all = Array.from(document.querySelectorAll('[contenteditable="true"]'));
+          el = all.find(function(e) {
+            var r = e.getBoundingClientRect();
+            return r.width > 80 && r.height > 20;
+          }) || null;
+        }
+
+        return el;
+      }, 15000);
 
       // ── Clear and type the message ───────────────────────────────────────
       composeBox.focus();
@@ -253,20 +273,28 @@ function autoSendLinkedInMessage(messageText, msgId, recipientName) {
 
       // ── Find and click the Send button ───────────────────────────────────
       var sendBtn = await waitFor(function() {
-        var btns = Array.from(document.querySelectorAll(
+        // Try specific class selectors
+        var candidates = Array.from(document.querySelectorAll(
           'button.msg-form__send-button, ' +
           '.msg-form__footer button[type="submit"], ' +
-          'form button[type="submit"], ' +
+          '.msg-overlay-conversation-bubble button[type="submit"], ' +
           'button[data-control-name="send"]'
         ));
-        // Prefer a non-disabled button
-        return btns.find(function(b) { return !b.disabled; }) ||
-               btns[0] ||  // accept disabled as last resort (let click reveal error)
-               null;
+
+        // Also search by aria-label or visible text "Send"
+        if (!candidates.length) {
+          candidates = Array.from(document.querySelectorAll('button')).filter(function(b) {
+            var label = (b.getAttribute('aria-label') || '').toLowerCase();
+            var text  = b.textContent.trim().toLowerCase();
+            return label === 'send' || label.includes('send message') || text === 'send';
+          });
+        }
+
+        return candidates.find(function(b) { return !b.disabled; }) || null;
       }, 10000);
 
-      if (sendBtn.disabled) {
-        throw new Error('Send button is disabled — message text may not have registered. Try again.');
+      if (!sendBtn || sendBtn.disabled) {
+        throw new Error('Send button not found or disabled — message text may not have registered.');
       }
 
       sendBtn.click();
