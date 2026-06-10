@@ -18,7 +18,8 @@
   "permissions": [
     "storage",
     "notifications",
-    "alarms"
+    "alarms",
+    "tabs"
   ],
   "host_permissions": []
 }

@@ -71,7 +71,7 @@ function renderMessages(messages) {
   messageList.innerHTML = sorted.map(msg => {
     const dt       = new Date(msg.scheduledTime);
     const isOverdue = msg.status === 'pending' && dt < new Date();
-    const status   = isOverdue ? 'overdue' : msg.status;
+    const status   = isOverdue ? 'overdue' : (msg.status === 'sent' ? 'notified' : msg.status);
     const timeStr  = dt.toLocaleString('en-US', {
       month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
     });
@@ -109,7 +109,7 @@ function renderMessages(messages) {
             </svg>
             ${timeStr}
           </div>
-          <span class="status-pill ${status}">${isOverdue ? 'Overdue' : capitalise(msg.status)}</span>
+          <span class="status-pill ${status}">${isOverdue ? 'Overdue' : (msg.status === 'notified' ? 'Notified ✓' : capitalise(msg.status))}</span>
         </div>
       </div>`;
   }).join('');
@@ -221,6 +221,14 @@ function escapeHtml(str) {
 function capitalise(str) {
   return str ? str.charAt(0).toUpperCase() + str.slice(1) : '';
 }
+
+// ── Auto-refresh when background changes storage ──────────────────────────────
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.scheduledMessages) {
+    renderMessages(changes.scheduledMessages.newValue || []);
+    updateBadge(changes.scheduledMessages.newValue || []);
+  }
+});
 
 // ── On load ───────────────────────────────────────────────────────────────────
 loadMessages();

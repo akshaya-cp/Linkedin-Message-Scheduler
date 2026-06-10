@@ -18,11 +18,11 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
     if (!msg || msg.status !== 'pending') return;
 
-    // Fire the OS notification
+    // Fire the OS notification — use full extension URL for icon (required in service worker)
     chrome.notifications.create(`notif_${msgId}`, {
       type:     'basic',
-      iconUrl:  'icons/icon128.png',
-      title:    `Send message to ${msg.recipientName}`,
+      iconUrl:  chrome.runtime.getURL('icons/icon128.png'),
+      title:    `⏰ Time to message ${msg.recipientName}`,
       message:  msg.messageText.length > 100
                   ? msg.messageText.slice(0, 97) + '…'
                   : msg.messageText,
@@ -30,13 +30,17 @@ chrome.alarms.onAlarm.addListener((alarm) => {
       buttons:  msg.profileUrl
                   ? [{ title: 'Open LinkedIn Profile' }]
                   : []
+    }, (notifId) => {
+      if (chrome.runtime.lastError) {
+        console.error('Notification failed:', chrome.runtime.lastError.message);
+        return;
+      }
+      // Mark as notified only after notification successfully created
+      const updated = messages.map(m =>
+        m.id === msgId ? { ...m, status: 'notified', notifiedAt: new Date().toISOString() } : m
+      );
+      chrome.storage.local.set({ scheduledMessages: updated });
     });
-
-    // Mark message as sent in storage
-    const updated = messages.map(m =>
-      m.id === msgId ? { ...m, status: 'sent', sentAt: new Date().toISOString() } : m
-    );
-    chrome.storage.local.set({ scheduledMessages: updated });
   });
 });
 
