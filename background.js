@@ -23,6 +23,18 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 
   await updateStatus(msgId, 'sending', {});
+
+  // Safety net: if nothing responds within 35 seconds, mark as failed
+  setTimeout(async () => {
+    const { scheduledMessages: msgs = [] } = await chrome.storage.local.get('scheduledMessages');
+    const current = msgs.find(m => m.id === msgId);
+    if (current && current.status === 'sending') {
+      await updateStatus(msgId, 'failed', {
+        errorReason: 'Timed out — script ran but no result received. Try again or send manually.'
+      });
+    }
+  }, 35000);
+
   try {
     const tab = await chrome.tabs.create({ url: msg.profileUrl, active: true });
     await chrome.storage.session.set({
@@ -39,13 +51,37 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete') return;
+  if (!tab.url || !tab.url.includes('linkedin.com')) return;
+
+  // ── Case A: tab navigated to a messaging thread (Phase 1 clicked a link) ──
+  const navKey = 'phase2_nav_' + tabId;
+  const navSession = await chrome.storage.session.get(navKey);
+  const navPending = navSession[navKey];
+  if (navPending && tab.url.match(/linkedin\.com\/messaging\//)) {
+    await chrome.storage.session.remove(navKey);
+    setTimeout(async () => {
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId, allFrames: true },
+          func: phase2SendMessage,
+          args: [navPending.messageText, navPending.msgId, navPending.recipientName, 'nav-to-messaging']
+        });
+      } catch (err) {
+        await updateStatus(navPending.msgId, 'failed', { errorReason: '[Phase2-nav] ' + err.message });
+      }
+    }, 3000);
+    return;
+  }
+
+  // ── Case B: initial profile page load ──────────────────────────────────────
   const sessionKey = 'pending_tab_' + tabId;
   const session = await chrome.storage.session.get(sessionKey);
   const pending = session[sessionKey];
   if (!pending) return;
-  if (!tab.url || !tab.url.includes('linkedin.com')) return;
 
   await chrome.storage.session.remove(sessionKey);
+  // Store for navigation-based Phase 2 trigger
+  await chrome.storage.session.set({ [navKey]: pending });
 
   // ── Phase 1 (after 6s): click Message button in main frame ─────────────────
   setTimeout(async () => {
@@ -242,10 +278,23 @@ function phase2SendMessage(messageText, msgId, recipientName, phase1Result) {
     return;
   }
 
+  var isMainFrame = (window === window.top);
+
   // ── Check if THIS frame has a compose box ───────────────────────────────
   var immediate = findComposeBox();
   if (!immediate) {
-    // Nothing here — wrong frame, exit silently
+    // Main frame reports back with debug info so we know what's on the page
+    if (isMainFrame) {
+      var allEditable = Array.from(document.querySelectorAll('[contenteditable], textarea, input')).slice(0, 5);
+      var editableInfo = allEditable.map(function(e) {
+        return e.tagName + '[ce=' + e.getAttribute('contenteditable') + '][ph=' + (e.getAttribute('placeholder') || e.getAttribute('aria-label') || '') + ']';
+      }).join(' | ') || 'none';
+      chrome.runtime.sendMessage({
+        type: 'LINKEDIN_SEND_RESULT', msgId: msgId, recipientName: recipientName,
+        success: false,
+        error: '[Phase2] No compose box. URL=' + frameUrl.slice(0, 80) + ' | Editables: ' + editableInfo + ' | p1=' + phase1Result
+      });
+    }
     return;
   }
 
